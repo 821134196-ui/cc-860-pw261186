@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>pgpool — session-pinning proxy monitor</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane: #f9f9f7;
+    --surface: #fcfcfb;
+    --surface-2: #f3f2ee;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --s1: #2a78d6;
+    --s2: #eb6834;
+    --s3: #1baf7a;
+    --good: #0ca30c;
+    --good-text: #006300;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --shadow: 0 1px 2px rgba(11, 11, 11, 0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --plane: #0d0d0d;
+      --surface: #1a1a19;
+      --surface-2: #232321;
+      --ink-1: #f0efec;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --s1: #3987e5;
+      --s2: #d95926;
+      --s3: #199e70;
+      --good-text: #0ca30c;
+      --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink-1: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --good-text: #0ca30c;
+    --shadow: none;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--plane);
+    color: var(--ink-1);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 20px 44px; }
+
+  /* ---------------------------------------------------------------- header */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0 18px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .brand h1 { font-size: 19px; font-weight: 650; letter-spacing: -0.015em; margin: 0; }
+  .brand .sub { color: var(--ink-2); font-size: 13px; }
+  .logo {
+    display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+    background: var(--ink-1); color: var(--surface); font-size: 12px; font-weight: 700;
+    align-self: center; font-variant-numeric: tabular-nums;
+  }
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+  .conn {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2);
+    border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 4px 11px;
+  }
+  .conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background .2s; }
+  .conn[data-state="live"] .dot { background: var(--good); }
+  .conn[data-state="down"] .dot { background: var(--critical); }
+  .conn[data-state="retry"] .dot { background: var(--warning); }
+  button {
+    font: inherit; font-size: 12.5px; color: var(--ink-1); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 5px 11px; cursor: pointer;
+  }
+  button:hover { background: var(--surface-2); }
+  button:focus-visible, .queue-item:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--surface-2); border-color: var(--axis); }
+
+  /* ----------------------------------------------------------------- tiles */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(154px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 13px 15px 12px; box-shadow: var(--shadow); min-width: 0;
+  }
+  .tile .label { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+  .tile .value { font-size: 27px; font-weight: 620; letter-spacing: -0.02em; line-height: 1.15; margin-top: 3px; }
+  .tile .value .unit { font-size: 15px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; }
+  .tile .note { font-size: 12px; color: var(--ink-2); margin-top: 1px; min-height: 18px; }
+  .tile .note .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; background: var(--muted); }
+  .tile[data-tone="warn"] .value { color: var(--ink-1); }
+  .tile[data-tone="warn"] .note .dot { background: var(--warning); }
+  .tile[data-tone="bad"] .note .dot { background: var(--critical); }
+  .tile[data-tone="good"] .note .dot { background: var(--good); }
+
+  /* ---------------------------------------------------------------- panels */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 15px 17px 16px; box-shadow: var(--shadow); min-width: 0;
+  }
+  .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+  .panel-head h2 { font-size: 14.5px; font-weight: 620; margin: 0; letter-spacing: -0.005em; }
+  .panel-head .hint { font-size: 12px; color: var(--ink-2); margin: 1px 0 0; }
+  .panel-head .tools { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+  /* ----------------------------------------------------------------- chart */
+  .chart-wrap { position: relative; margin-top: 8px; }
+  #chart { display: block; width: 100%; height: 236px; touch-action: pan-y; overflow: visible; }
+  #chart:focus-visible { outline: 2px solid var(--s1); outline-offset: 3px; border-radius: 6px; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+  .chart-legend .item { display: inline-flex; align-items: center; gap: 7px; }
+  .chart-legend .swatch { width: 15px; height: 2px; border-radius: 2px; background: var(--sw); }
+  .chart-empty {
+    position: absolute; inset: 24px 60px 34px 40px; display: grid; place-items: center;
+    color: var(--muted); font-size: 12.5px; pointer-events: none; text-align: center;
+  }
+  .chart-empty[hidden] { display: none; }
+  .tooltip {
+    position: absolute; pointer-events: none; z-index: 4; min-width: 132px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16); padding: 9px 11px; font-size: 12px;
+  }
+  .tooltip[hidden] { display: none; }
+  .tooltip .t-head { color: var(--muted); font-size: 11px; margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+  .tooltip .t-row { display: flex; align-items: center; gap: 7px; line-height: 1.7; }
+  .tooltip .t-row .swatch { width: 12px; height: 2px; border-radius: 2px; background: var(--sw); }
+  .tooltip .t-row .name { color: var(--ink-2); flex: 1; }
+  .tooltip .t-row .val { font-variant-numeric: tabular-nums; color: var(--ink-1); font-weight: 600; }
+
+  .table-view { margin-top: 12px; }
+  .table-view[hidden] { display: none; }
+  .table-scroll { max-height: 230px; overflow: auto; border: 1px solid var(--grid); border-radius: 8px; }
+
+  /* ---------------------------------------------------------------- tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    font-weight: 600; text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid);
+    white-space: nowrap;
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-2); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  .table-scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+  .table-scroll td, .table-scroll th { padding: 7px 10px; }
+  .mono { font-variant-numeric: tabular-nums; }
+  .owner { display: flex; flex-direction: column; line-height: 1.35; }
+  .owner .sub, .cell-sub { color: var(--muted); font-size: 11.5px; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 14px 4px 6px; }
+
+  /* ----------------------------------------------------------------- chips */
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; line-height: 1.6;
+    color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+    white-space: nowrap; background: transparent; vertical-align: 1px;
+  }
+  .chip .ico { font-size: 10.5px; line-height: 1; color: var(--c, var(--muted)); }
+  .chip[data-state="free"] { --c: var(--good); }
+  .chip[data-state="assigned"] { --c: var(--ink-2); }
+  .chip[data-state="resetting"] { --c: var(--warning); }
+  .chip[data-state="broken"] { --c: var(--critical); }
+  .pin-chip { border-color: transparent; background: var(--surface-2); color: var(--ink-2); }
+  .pin-chip .ico { color: var(--warning); }
+
+  .grid-2 { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+  @media (max-width: 940px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+
+  .panel-block { margin-top: 14px; }
+
+  /* ----------------------------------------------------------------- queue */
+  .queue-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .queue-item {
+    display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--grid); background: var(--surface-2);
+  }
+  .queue-item .token {
+    display: inline-grid; place-items: center; min-width: 26px; height: 26px; border-radius: 7px;
+    background: var(--surface); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .queue-item .q-main { display: flex; flex-direction: column; line-height: 1.35; min-width: 0; }
+  .queue-item .q-main .who { font-size: 13px; }
+  .queue-item .q-main .why { font-size: 11.5px; color: var(--muted); }
+  .queue-item .q-wait { margin-left: auto; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .queue-item .q-bar { flex: 0 0 54px; height: 3px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+  .queue-item .q-bar span { display: block; height: 100%; background: var(--s2); border-radius: 2px; transition: width .4s linear; }
+
+  /* ---------------------------------------------------------------- events */
+  .events { list-style: none; margin: 10px 0 0; padding: 0; max-height: 330px; overflow: auto; border-top: 1px solid var(--grid); }
+  .event { display: flex; gap: 10px; align-items: baseline; padding: 7px 2px; border-bottom: 1px solid var(--grid); font-size: 12.5px; }
+  .event:last-child { border-bottom: none; }
+  .event .t { flex: 0 0 52px; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  .event .lvl { flex: 0 0 54px; }
+  .event .body { min-width: 0; }
+  .event .actor { color: var(--ink-2); }
+  .event .text { color: var(--ink-1); }
+  .event .kind {
+    flex: 0 0 74px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lvl .chip { padding: 0 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .lvl .chip[data-level="good"] { --c: var(--good); }
+  .lvl .chip[data-level="warn"] { --c: var(--warning); }
+  .lvl .chip[data-level="error"] { --c: var(--critical); }
+  .lvl .chip[data-level="info"] { --c: var(--muted); }
+  @media (max-width: 720px) { .event .kind { display: none; } }
+  @media (max-width: 780px) {
+    td.col-pin .chip { white-space: normal; word-break: break-word; }
+  }
+  @media (max-width: 620px) {
+    .col-tx, .col-uses, .col-owner { display: none; }
+    .panel { padding: 13px 12px 14px; }
+    .panel-head .hint { display: none; }
+  }
+  @media (max-width: 470px) {
+    .tiles { grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 10px; }
+    .tile .value { font-size: 24px; }
+  }
+
+  .footer { margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .footer code { font-size: 11.5px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">pg</span>
+      <h1>Pool monitor</h1>
+      <span class="sub">session-pinning PostgreSQL proxy</span>
+    </div>
+    <div class="topbar-right">
+      <span class="conn" id="conn" data-state="retry" role="status"><span class="dot" aria-hidden="true"></span><span id="connText">connecting…</span></span>
+      <button id="themeBtn" type="button" aria-label="Color theme">Theme: auto</button>
+    </div>
+  </header>
+
+  <section class="tiles" id="tiles" aria-label="Pool summary"></section>
+
+  <section class="panel" aria-labelledby="chartTitle">
+    <div class="panel-head">
+      <div>
+        <h2 id="chartTitle">Pool activity — last 45&nbsp;s</h2>
+        <p class="hint" id="chartHint">Backends in use or being cleaned, idle capacity, and clients waiting for a backend.</p>
+      </div>
+      <div class="tools">
+        <button id="tableViewBtn" type="button" aria-pressed="false" aria-controls="chartTable">Table</button>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <svg id="chart" role="img" tabindex="0" aria-labelledby="chartTitle" aria-describedby="chartHint"></svg>
+      <div class="chart-empty" id="chartEmpty">Collecting samples…</div>
+      <div class="tooltip" id="tip" hidden aria-hidden="true"></div>
+    </div>
+    <div class="chart-legend" id="legend"></div>
+    <div class="table-view" id="chartTable" hidden>
+      <div class="table-scroll">
+        <table>
+          <caption class="sr-only">Sampled pool state over the last 45 seconds</caption>
+          <thead><tr><th scope="col">Time</th><th scope="col" class="num">In use</th><th scope="col" class="num">Idle</th><th scope="col" class="num">Waiting</th></tr></thead>
+          <tbody id="chartTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid-2">
+    <section class="panel" aria-labelledby="ownTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="ownTitle">Backend ownership</h2>
+          <p class="hint">Which pooled server connection each client currently holds, and why it is pinned.</p>
+        </div>
+      </div>
+      <div class="table-scroll" style="max-height: 360px;">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Backend</th>
+              <th scope="col">State</th>
+              <th scope="col" class="col-owner">Owner</th>
+              <th scope="col" class="col-tx">Tx</th>
+              <th scope="col" class="col-pin">Pinned by</th>
+              <th scope="col" class="num col-uses">Uses / resets</th>
+            </tr>
+          </thead>
+          <tbody id="ownerBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="ownerEmpty" hidden>No backends open.</div>
+    </section>
+
+    <section class="panel" aria-labelledby="queueTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="queueTitle">Waiting queue</h2>
+          <p class="hint">FIFO by arrival; a waiter leaves when a backend is released or its checkout timeout fires.</p>
+        </div>
+        <span class="chip" id="queueCount" aria-live="polite">0</span>
+      </div>
+      <ul class="queue-list" id="queueList"></ul>
+      <div class="empty" id="queueEmpty">No one is waiting — every request got a backend immediately.</div>
+    </section>
+  </div>
+
+  <section class="panel panel-block" aria-labelledby="eventsTitle">
+    <div class="panel-head">
+      <div>
+        <h2 id="eventsTitle">Event feed</h2>
+        <p class="hint">Connect, checkout, pin, cancel, cleanup and quarantine decisions, newest first.</p>
+      </div>
+      <span class="chip" id="eventCount">0</span>
+    </div>
+    <ul class="events" id="events" aria-live="polite" aria-relevant="additions"></ul>
+    <div class="empty" id="eventsEmpty">No events yet.</div>
+  </section>
+
+  <p class="footer" id="footer"></p>
+</div>
+
+<script>
+"use strict";
+
+const NS = "http://www.w3.org/2000/svg";
+const $ = (sel) => document.querySelector(sel);
+
+const SERIES = [
+  { key: "busy",    name: "In use",  color: "var(--s1)", get: (d) => d.busy || 0 },
+  { key: "waiting", name: "Waiting", color: "var(--s2)", get: (d) => d.waiting || 0 },
+  { key: "idle",    name: "Idle",    color: "var(--s3)", get: (d) => Math.max(0, (d.total || 0) - (d.busy || 0)) },
+];
+
+let state = null;
+let theme = localStorage.getItem("pgpool-theme") || "auto";
+let hoverIdx = null;
+let chartLayout = null;
+let source = null;
+let lastEventsSig = "";
+let lastOwnerSig = "";
+let lastQueueSig = "";
+let lastTilesSig = "";
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtInt = (n) => Number(n || 0).toLocaleString();
+
+/* ------------------------------------------------------------------ theme */
+function applyTheme() {
+  if (theme === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", theme);
+  $("#themeBtn").textContent = "Theme: " + theme;
+  localStorage.setItem("pgpool-theme", theme);
+  if (state) { renderChart(); }
+}
+$("#themeBtn").addEventListener("click", () => {
+  theme = theme === "auto" ? "light" : theme === "light" ? "dark" : "auto";
+  applyTheme();
+});
+
+/* ------------------------------------------------------------- data feed */
+function connect() {
+  if (source) source.close();
+  setConn("retry", "connecting…");
+  fetch("/api/state").then((r) => r.json()).then((s) => { state = s; render(); setConn("live", "live"); })
+    .catch(() => {});
+  source = new EventSource("/api/events");
+  source.addEventListener("state", (ev) => {
+    try {
+      state = JSON.parse(ev.data);
+    } catch (_) { return; }
+    setConn("live", "live");
+    render();
+  });
+  source.onerror = () => {
+    setConn("retry", "reconnecting…");
+    setTimeout(() => { if (!state || source.readyState === EventSource.CLOSED) connect(); }, 1500);
+  };
+  source.onopen = () => setConn("live", "live");
+}
+function setConn(kind, text) {
+  const el = $("#conn");
+  el.dataset.state = kind;
+  $("#connText").textContent = text;
+}
+
+/* ---------------------------------------------------------------- tiles */
+function tile(label, value, unit, note, tone, noteDot) {
+  return `<div class="tile"${tone ? ` data-tone="${tone}"` : ""}>
+    <div class="label">${esc(label)}</div>
+    <div class="value">${esc(String(value))}${unit ? `<span class="unit"> ${esc(unit)}</span>` : ""}</div>
+    <div class="note">${noteDot !== false ? '<span class="dot" aria-hidden="true"></span>' : ""}${esc(note)}</div>
+  </div>`;
+}
+function renderTiles() {
+  const s = state.stats;
+  const cfg = state.config;
+  const open = s.active_backends;
+  const max = cfg.max_backends;
+  const atCap = open >= max;
+  const q = s.waiting;
+  const quarantined = s.quarantines;
+  const html = [
+    tile("Backends", open, `/ ${max}`, atCap ? "at capacity" : `${max - open} slot${max - open === 1 ? "" : "s"} free`, atCap ? "warn" : "", true),
+    tile("In use", s.in_use + s.resetting, "conns", s.resetting ? `${s.resetting} cleaning up` : "checked out to clients", "", s.in_use + s.resetting > 0),
+    tile("Pinned", s.pinned_backends, "sessions", s.pinned_backends ? "session state held across commits" : "no session state pinned", s.pinned_backends ? "warn" : "good", true),
+    tile("Waiting", q, "clients", q ? "queued for a backend" : "queue empty", q ? "warn" : "good", true),
+    tile("Checkouts", fmtInt(s.checkouts), "", `${fmtInt(s.waits)} queued wait${s.waits === 1 ? "" : "s"}`, "", false),
+    tile("Cleanups", fmtInt(s.resets), "", "DISCARD ALL + probe passed", "", false),
+    tile("Quarantined", fmtInt(quarantined), "", quarantined ? "backends destroyed on residue" : "no backend leaked state", quarantined ? "bad" : "good", true),
+  ].join("");
+  if (html !== lastTilesSig) {
+    $("#tiles").innerHTML = html;
+    lastTilesSig = html;
+  }
+}
+
+/* ---------------------------------------------------------------- chart */
+function niceScale(maxVal) {
+  const target = Math.max(1, maxVal);
+  const candidates = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+  const step = candidates.find((c) => c >= target / 4) || 10000;
+  const max = Math.ceil(target / step) * step;
+  const ticks = [];
+  for (let v = 0; v <= max + 1e-9; v += step) ticks.push(v);
+  return { max, ticks };
+}
+
+function renderChart() {
+  const svg = $("#chart");
+  const data = (state && state.series) || [];
+  const box = svg.getBoundingClientRect().width || 760;
+  const W = Math.max(240, Math.floor(box));
+  const H = 236;
+  // Reserve room for the direct end labels only where there is room for them.
+  const m = { top: 12, right: box > 420 ? 66 : 12, bottom: 24, left: 36 };
+  const pw = W - m.left - m.right;
+  const ph = H - m.top - m.bottom;
+
+  $("#chartEmpty").hidden = data.length >= 2;
+
+  const tmax = data.length ? data[data.length - 1].t : 0;
+  const span = data.length >= 2 ? Math.min(45, Math.max(10, tmax - data[0].t)) : 10;
+  const tmin = tmax - span;
+
+  const values = [];
+  data.forEach((d) => SERIES.forEach((s) => values.push(s.get(d))));
+  const scale = niceScale(Math.max(1, ...values));
+  const ymax = scale.max;
+
+  const x = (t) => m.left + ((t - tmin) / (span || 1)) * pw;
+  const y = (v) => m.top + ph - (v / ymax) * ph;
+
+  const pathFor = (s) => data.map((d, i) => `${i ? "L" : "M"}${x(d.t).toFixed(1)},${y(s.get(d)).toFixed(1)}`).join(" ");
+
+  let out = "";
+  // grid + y ticks
+  scale.ticks.forEach((v) => {
+    const yy = y(v).toFixed(1);
+    out += `<line x1="${m.left}" y1="${yy}" x2="${m.left + pw}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    out += `<text x="${m.left - 9}" y="${(+yy + 3.5).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--muted)" style="font-variant-numeric:tabular-nums">${v}</text>`;
+  });
+  // baseline
+  out += `<line x1="${m.left}" y1="${m.top + ph}" x2="${m.left + pw}" y2="${m.top + ph}" stroke="var(--axis)" stroke-width="1"/>`;
+  // x labels
+  const xs = [0, 0.5, 1];
+  xs.forEach((f) => {
+    const t = tmin + span * f;
+    const label = f === 1 ? "now" : `−${Math.round(tmax - t)}s`;
+    const xx = m.left + pw * f;
+    const anchor = f === 1 ? "end" : f === 0 ? "start" : "middle";
+    out += `<text x="${xx.toFixed(1)}" y="${H - 6}" text-anchor="${anchor}" font-size="11" fill="var(--muted)" style="font-variant-numeric:tabular-nums">${label}</text>`;
+  });
+
+  // lines: idle (back), busy, waiting (front)
+  const order = ["idle", "busy", "waiting"];
+  order.forEach((key) => {
+    const s = SERIES.find((s) => s.key === key);
+    if (!s || data.length < 2) return;
+    out += `<path d="${pathFor(s)}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  });
+
+  // end dots + direct labels, dodged vertically
+  const ends = SERIES.map((s) => ({
+    s,
+    v: data.length ? s.get(data[data.length - 1]) : 0,
+    y: data.length ? y(s.get(data[data.length - 1])) : m.top + ph,
+  })).sort((a, b) => a.y - b.y);
+  let prev = -Infinity;
+  ends.forEach((e) => {
+    e.labelY = Math.max(e.y, prev + 14);
+    prev = e.labelY;
+  });
+  const overflow = ends.length ? ends[ends.length - 1].labelY - (m.top + ph) : 0;
+  if (overflow > 0) ends.forEach((e) => { e.labelY -= overflow; });
+  if (data.length && box > 420) {
+    ends.forEach((e) => {
+      out += `<circle cx="${x(tmax).toFixed(1)}" cy="${e.y.toFixed(1)}" r="4" fill="${e.s.color}" stroke="var(--surface)" stroke-width="2"/>`;
+      const lx = m.left + pw + 10;
+      out += `<line x1="${lx}" y1="${e.labelY.toFixed(1)}" x2="${lx + 10}" y2="${e.labelY.toFixed(1)}" stroke="${e.s.color}" stroke-width="2" stroke-linecap="round"/>`;
+      out += `<text x="${lx + 15}" y="${(e.labelY + 3.8).toFixed(1)}" font-size="11" fill="var(--ink-2)">${esc(e.s.name)}</text>`;
+    });
+  }
+
+  out += `<g id="hoverLayer"></g>`;
+  out += `<rect id="plotHit" x="${m.left}" y="${m.top}" width="${pw}" height="${ph}" fill="transparent" style="cursor:crosshair"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", String(W));
+  svg.setAttribute("height", String(H));
+  svg.innerHTML = out;
+
+  chartLayout = { W, H, m, pw, ph, tmin, span, ymax, x, y, data };
+  if (hoverIdx !== null && data.length) drawHover(Math.min(hoverIdx, data.length - 1));
+  else $("#tip").hidden = true;
+}
+
+function drawHover(idx) {
+  if (!chartLayout || !state) return;
+  const { data, x, y, m, ph } = chartLayout;
+  const d = data[idx];
+  if (!d) return;
+  hoverIdx = idx;
+  const layer = document.getElementById("hoverLayer");
+  const cx = x(d.t);
+  let html = `<line x1="${cx.toFixed(1)}" y1="${m.top}" x2="${cx.toFixed(1)}" y2="${(m.top + ph).toFixed(1)}" stroke="var(--axis)" stroke-width="1"/>`;
+  const rows = SERIES.map((s) => {
+    const v = s.get(d);
+    const cy = y(v);
+    html += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`;
+    return { s, v };
+  });
+  if (layer) layer.innerHTML = html;
+
+  const tip = $("#tip");
+  tip.innerHTML = `<div class="t-head">${idx === data.length - 1 ? "now" : `−${Math.round(data[data.length - 1].t - d.t)} s`}</div>` +
+    rows.map((r) => `<div class="t-row"><span class="swatch" style="--sw:${r.s.color}"></span><span class="name">${esc(r.s.name)}</span><span class="val">${r.v}</span></div>`).join("");
+  tip.hidden = false;
+
+  const wrap = svgWrapRect();
+  const scaleX = wrap.width / chartLayout.W;
+  let left = cx * scaleX + 14;
+  const tw = tip.offsetWidth || 140;
+  if (left + tw > wrap.width - 4) left = cx * scaleX - tw - 14;
+  left = Math.max(4, Math.min(left, wrap.width - tw - 4));
+  y_offset(tip, left);
+}
+function svgWrapRect() {
+  const wrap = $("#chart").parentElement.getBoundingClientRect();
+  return { width: wrap.width, height: wrap.height };
+}
+function y_offset(tip, left) {
+  tip.style.left = left + "px";
+  tip.style.top = "12px";
+}
+
+function nearestIndex(clientX) {
+  if (!chartLayout || !chartLayout.data.length) return null;
+  const { m, pw, tmin, span, data } = chartLayout;
+  const rect = $("#chart").getBoundingClientRect();
+  const scale = chartLayout.W / rect.width;
+  const px = clientX * scale;
+  if (px < m.left - 6 || px > m.left + pw + 6) return null;
+  const t = tmin + ((px - m.left) / pw) * span;
+  let best = 0, bestD = Infinity;
+  data.forEach((d, i) => {
+    const dd = Math.abs(d.t - t);
+    if (dd < bestD) { bestD = dd; best = i; }
+  });
+  return best;
+}
+
+function clearHover() {
+  hoverIdx = null;
+  const layer = document.getElementById("hoverLayer");
+  if (layer) layer.innerHTML = "";
+  $("#tip").hidden = true;
+}
+
+$("#chart").addEventListener("pointermove", (ev) => {
+  const i = nearestIndex(ev.clientX);
+  if (i === null) clearHover(); else drawHover(i);
+});
+$("#chart").addEventListener("pointerleave", clearHover);
+$("#chart").addEventListener("keydown", (ev) => {
+  if (!chartLayout || !chartLayout.data.length) return;
+  const n = chartLayout.data.length;
+  if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+    const cur = hoverIdx === null ? (ev.key === "ArrowRight" ? -1 : n) : hoverIdx;
+    drawHover(Math.max(0, Math.min(n - 1, cur + (ev.key === "ArrowRight" ? 1 : -1))));
+    ev.preventDefault();
+  } else if (ev.key === "Escape") {
+    clearHover();
+  }
+});
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (state) renderChart(); }, 80);
+});
+
+/* ----------------------------------------------------------- chart legend */
+function renderLegend() {
+  $("#legend").innerHTML = SERIES.map((s) => `<span class="item"><span class="swatch" style="--sw:${s.color}" aria-hidden="true"></span>${esc(s.name)}</span>`).join("");
+}
+
+/* ------------------------------------------------------------ chart table */
+function renderChartTable() {
+  const rows = ((state && state.series) || []).slice(-18).reverse();
+  const tmax = state && state.series.length ? state.series[state.series.length - 1].t : 0;
+  $("#chartTableBody").innerHTML = rows.map((d) => `<tr>
+      <td class="mono">${d.t >= tmax - 0.01 ? "now" : `−${Math.round(tmax - d.t)} s`}</td>
+      <td class="num">${d.busy}</td>
+      <td class="num">${Math.max(0, d.total - d.busy)}</td>
+      <td class="num">${d.waiting}</td>
+    </tr>`).join("");
+}
+
+$("#tableViewBtn").addEventListener("click", () => {
+  const btn = $("#tableViewBtn");
+  const open = btn.getAttribute("aria-pressed") === "true";
+  btn.setAttribute("aria-pressed", String(!open));
+  $("#chartTable").hidden = open;
+  if (!open) renderChartTable();
+});
+
+/* --------------------------------------------------------------- ownership */
+const STATE_META = {
+  free:      { ico: "✓", label: "free" },
+  assigned:  { ico: "▶", label: "in use" },
+  resetting: { ico: "↻", label: "cleaning" },
+  broken:    { ico: "✕", label: "broken" },
+};
+const TX_LABEL = { I: "idle", T: "in tx", E: "aborted" };
+
+function stateChip(st) {
+  const meta = STATE_META[st] || { ico: "·", label: st };
+  return `<span class="chip" data-state="${esc(st)}"><span class="ico" aria-hidden="true">${meta.ico}</span>${esc(meta.label)}</span>`;
+}
+
+function renderOwners() {
+  const backends = state.backends || [];
+  const clients = new Map((state.clients || []).map((c) => [c.id, c]));
+  const sig = JSON.stringify(backends.map((b) => [b.id, b.state, b.owner, b.tx, b.pinned_since, Math.floor(state.uptime), b.checkouts, b.resets, b.destroy_reason])) +
+    JSON.stringify((state.clients || []).map((c) => [c.id, c.pinned_reason, c.peer, c.state]));
+  if (sig === lastOwnerSig) return;
+  lastOwnerSig = sig;
+  $("#ownerEmpty").hidden = backends.length > 0;
+  $("#ownerBody").innerHTML = backends.map((b) => {
+    const c = b.owner != null ? clients.get(b.owner) : null;
+    const pinnedFor = b.pinned_since != null
+      ? `${Math.max(0, Math.round(state.uptime - b.pinned_since))} s`
+      : null;
+    const reason = c && c.pinned_reason ? c.pinned_reason : (b.tx === "T" || b.tx === "E" ? "transaction" : null);
+    const pin = reason
+      ? `<span class="chip pin-chip"><span class="ico" aria-hidden="true">⚲</span>${esc(reason)}${pinnedFor ? ` · ${pinnedFor}` : ""}</span>`
+      : `<span class="cell-sub">—</span>`;
+    const owner = b.owner != null
+      ? `<span class="owner"><span>client ${b.owner}</span><span class="sub">${esc((c && c.peer) || "disconnected")}${c ? ` · ${esc(c.user)}/${esc(c.database)}` : ""}</span></span>`
+      : `<span class="cell-sub">${b.state === "resetting" ? "being cleaned" : b.state === "broken" ? "quarantined" : "—"}</span>`;
+    const tx = b.tx && TX_LABEL[b.tx] ? `<span class="chip"><span class="ico" aria-hidden="true">${b.tx === "I" ? "·" : "◆"}</span>${TX_LABEL[b.tx]}</span>` : `<span class="cell-sub">—</span>`;
+    const note = b.destroy_reason
+      ? `<span class="cell-sub" title="${esc(b.destroy_reason)}">${esc(b.destroy_reason.length > 42 ? b.destroy_reason.slice(0, 42) + "…" : b.destroy_reason)}</span>`
+      : `<span class="cell-sub mono">${esc(b.pid ? "pid " + b.pid : "opening…")}</span>`;
+    return `<tr>
+      <td><span class="owner"><span class="mono">#${b.id}</span><span class="sub">gen ${b.generation} · ${note}</span></span></td>
+      <td>${stateChip(b.state)}</td>
+      <td class="col-owner">${owner}</td>
+      <td class="col-tx">${tx}</td>
+      <td class="col-pin">${pin}</td>
+      <td class="num col-uses"><span class="mono">${fmtInt(b.checkouts)}</span> <span class="cell-sub">/ ${fmtInt(b.resets)}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+/* ------------------------------------------------------------------ queue */
+function renderQueue() {
+  const q = state.queue || [];
+  const sig = JSON.stringify(q.map((w) => [w.token, w.client_id, w.reason, Math.floor((w.waited_ms || 0) / 100)]));
+  $("#queueCount").textContent = q.length === 1 ? "1 waiting" : `${q.length} waiting`;
+  if (sig === lastQueueSig) return;
+  lastQueueSig = sig;
+  $("#queueEmpty").hidden = q.length > 0;
+  const oldest = Math.max(1, ...q.map((w) => w.waited_ms || 0));
+  $("#queueList").innerHTML = q.map((w) => {
+    const pct = Math.max(3, Math.round(((w.waited_ms || 0) / oldest) * 100));
+    return `<li class="queue-item" tabindex="0">
+      <span class="token" aria-hidden="true">${w.token}</span>
+      <span class="q-main">
+        <span class="who">client ${w.client_id}</span>
+        <span class="why">${esc(w.reason || "checkout")} · FIFO token ${w.token}</span>
+      </span>
+      <span class="q-bar" aria-hidden="true"><span style="width:${pct}%"></span></span>
+      <span class="q-wait">${(w.waited_ms / 1000).toFixed(1)} s</span>
+    </li>`;
+  }).join("");
+}
+
+/* ----------------------------------------------------------------- events */
+function renderEvents() {
+  const evs = (state.events || []).slice(-80).reverse();
+  const sig = evs.length ? evs[0].t + "|" + evs.length + "|" + evs[0].text : "";
+  if (sig === lastEventsSig) return;
+  lastEventsSig = sig;
+  $("#eventsEmpty").hidden = evs.length > 0;
+  $("#eventCount").textContent = `${(state.events || []).length} events`;
+  $("#events").innerHTML = evs.map((e) => {
+    const lvl = e.level || "info";
+    const ico = lvl === "warn" ? "⚠" : lvl === "error" ? "✕" : lvl === "good" ? "✓" : "·";
+    return `<li class="event">
+      <span class="t">+${e.t.toFixed(1)}s</span>
+      <span class="lvl"><span class="chip" data-level="${esc(lvl)}"><span class="ico" aria-hidden="true">${ico}</span>${esc(lvl === "good" ? "ok" : lvl)}</span></span>
+      <span class="kind">${esc(e.kind)}</span>
+      <span class="body"><span class="actor">${esc(e.actor)}</span> <span class="text">${esc(e.text)}</span></span>
+    </li>`;
+  }).join("");
+}
+
+/* ----------------------------------------------------------------- footer */
+function renderFooter() {
+  const cfg = state.config;
+  $("#footer").innerHTML = `Up ${Math.round(state.uptime)} s · server <code>${esc(cfg.server)}</code> · application_name <code>${esc(cfg.application_name)}</code> · checkout timeout ${cfg.checkout_timeout.toFixed(1)} s. ` +
+    `Every release runs <code>DISCARD ALL</code> followed by a verification probe; a backend with residual session state is quarantined and replaced.`;
+}
+
+/* ------------------------------------------------------------------ render */
+function render() {
+  if (!state) return;
+  renderTiles();
+  renderChart();
+  renderChartTable();
+  renderOwners();
+  renderQueue();
+  renderEvents();
+  renderFooter();
+}
+
+/* -------------------------------------------------------------------- boot */
+renderLegend();
+applyTheme();
+setConn("retry", "connecting…");
+connect();
+</script>
+</body>
+</html>
